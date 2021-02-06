@@ -15,7 +15,10 @@
 import jax
 import jax.numpy as jnp
 
+import numpy as onp
+
 import flax.nn as nn
+from flax.nn.activation import softmax
 
 from vit_jax import configs
 from vit_jax import models_resnet
@@ -90,6 +93,66 @@ class MlpBlock(nn.Module):
     output = nn.dropout(output, rate=dropout_rate, deterministic=deterministic)
     return output
 
+def _normalize_axes(axes, ndim):
+  # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
+  return tuple([ax if ax >= 0 else ndim + ax for ax in axes])
+
+def qkvTranformation(inputs, kernel, bias, dtype):
+  axis = (-1, )
+  batch_dims=()
+  ndim = inputs.ndim
+  n_batch_dims = len(batch_dims)
+  axis = _normalize_axes(axis, ndim)
+  batch_dims = _normalize_axes(batch_dims, ndim)
+  n_axis = len(axis)
+
+  batch_ind = tuple(range(n_batch_dims))
+  contract_ind = tuple(range(n_batch_dims, n_axis + n_batch_dims))
+
+  out = jax.lax.dot_general(inputs,
+                        kernel,
+                        ((axis, contract_ind), (batch_dims, batch_ind)),
+                        precision=None)
+
+  expand_dims = sorted(
+          set(range(inputs.ndim)) - set(axis) - set(batch_dims))
+  for ax in expand_dims:
+    bias = jnp.expand_dims(bias, ax)
+  bias = jnp.asarray(bias, dtype)
+  out = out + bias
+  return out
+
+def getAttentionMatrix(inputs, axis, attention_param, dtype):
+  query = qkvTranformation(inputs, attention_param['query']['kernel'],
+                           attention_param['query']['bias'], dtype)
+  key = qkvTranformation(inputs, attention_param['key']['kernel'],
+                           attention_param['key']['bias'], dtype)
+  value = qkvTranformation(inputs, attention_param['value']['kernel'],
+                           attention_param['value']['bias'], dtype)
+
+  depth = query.shape[-1]
+  n = key.ndim
+  batch_dims = tuple(onp.delete(range(n), axis + (n - 1,)))
+  qk_perm = batch_dims + axis + (n - 1,)
+  key = key.transpose(qk_perm)
+  query = query.transpose(qk_perm)
+  v_perm = batch_dims + (n - 1,) + axis
+  value = value.transpose(v_perm)
+
+  query = query / jnp.sqrt(depth).astype(dtype)
+  batch_dims_t = tuple(range(len(batch_dims)))
+
+  attention_weights = jax.lax.dot_general(
+      query,
+      key, (((n - 1,), (n - 1,)), (batch_dims_t, batch_dims_t)),
+      precision=None)
+
+  norm_dims = tuple(range(attention_weights.ndim - len(axis), attention_weights.ndim))
+  attention_weights = softmax(attention_weights, axis=norm_dims)
+  attention_weights = attention_weights.astype(dtype)
+
+  return attention_weights
+
 
 class Encoder1DBlock(nn.Module):
   """Transformer encoder layer."""
@@ -101,6 +164,7 @@ class Encoder1DBlock(nn.Module):
             dropout_rate=0.1,
             attention_dropout_rate=0.1,
             deterministic=True,
+            get_attention_weights = False,
             **attention_kwargs):
     """Applies Encoder1DBlock module.
 
@@ -120,6 +184,10 @@ class Encoder1DBlock(nn.Module):
     # Attention block.
     assert inputs.ndim == 3
     x = nn.LayerNorm(inputs, dtype=dtype)
+
+    if get_attention_weights:
+      x_tmp = x
+
     x = nn.SelfAttention(
         x,
         dtype=dtype,
@@ -131,6 +199,14 @@ class Encoder1DBlock(nn.Module):
         deterministic=deterministic,
         dropout_rate=attention_dropout_rate,
         **attention_kwargs)
+
+    if get_attention_weights:
+      attention_param = self.get_param('MultiHeadDotProductAttention_1')
+      attention_weights = getAttentionMatrix(x_tmp, (1,), attention_param, dtype)
+    else:
+      attention_weights = None
+
+
     x = nn.dropout(x, rate=dropout_rate, deterministic=deterministic)
     x = x + inputs
 
@@ -143,7 +219,7 @@ class Encoder1DBlock(nn.Module):
         dropout_rate=dropout_rate,
         deterministic=deterministic)
 
-    return x + y
+    return x + y, attention_weights
 
 
 class Encoder(nn.Module):
@@ -156,6 +232,7 @@ class Encoder(nn.Module):
             inputs_positions=None,
             dropout_rate=0.1,
             train=False,
+            attn_record_layer=0,
             **attention_kwargs):
     """Applies Transformer model on the inputs.
 
@@ -182,16 +259,26 @@ class Encoder(nn.Module):
 
     # Input Encoder
     for lyr in range(num_layers):
-      x = Encoder1DBlock(
+      if lyr == attn_record_layer:
+        get_attention_weights = True
+      else:
+        get_attention_weights = False
+
+      x, attention_weights = Encoder1DBlock(
           x,
           mlp_dim=mlp_dim,
           dropout_rate=dropout_rate,
           deterministic=not train,
           name=f'encoderblock_{lyr}',
+          get_attention_weights = get_attention_weights,
           **attention_kwargs)
+
+      if lyr == attn_record_layer:
+        attention_weights_res = attention_weights
+
     encoded = nn.LayerNorm(x, name='encoder_norm')
 
-    return encoded
+    return encoded, attention_weights_res
 
 
 class VisionTransformer(nn.Module):
@@ -206,7 +293,8 @@ class VisionTransformer(nn.Module):
             hidden_size=None,
             transformer=None,
             representation_size=None,
-            classifier='gap'):
+            classifier='gap',
+            attn_record_layer=0):
 
     # (Possibly partial) ResNet root.
     if resnet is not None:
@@ -253,7 +341,8 @@ class VisionTransformer(nn.Module):
         cls = jnp.tile(cls, [n, 1, 1])
         x = jnp.concatenate([cls, x], axis=1)
 
-      x = Encoder(x, train=train, name='Transformer', **transformer)
+      x, attention_weights = Encoder(x, train=train, name='Transformer', 
+        attn_record_layer=attn_record_layer, **transformer)
 
     if classifier == 'token':
       x = x[:, 0]
@@ -267,7 +356,7 @@ class VisionTransformer(nn.Module):
       x = IdentityLayer(x, name='pre_logits')
 
     x = nn.Dense(x, num_classes, name='head', kernel_init=nn.initializers.zeros)
-    return x
+    return x, attention_weights
 
 
 CONFIGS = {

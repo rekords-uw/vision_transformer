@@ -51,6 +51,13 @@ DATASET_PRESETS = {
         'crop': 384,
         'total_steps': 20_000,
     },
+    'svhn_cropped': {
+        'train': 'train[:98%]',
+        'test': 'test',
+        'resize': 512,
+        'crop': 384,
+        'total_steps': 10_000,
+    },
 }
 
 
