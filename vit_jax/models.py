@@ -250,6 +250,8 @@ class Encoder(nn.Module):
     """
     assert inputs.ndim == 3  # (batch, len, emb)
 
+    attention_weights_res = None
+
     x = AddPositionEmbs(
         inputs,
         inputs_positions=inputs_positions,
@@ -294,7 +296,7 @@ class VisionTransformer(nn.Module):
             transformer=None,
             representation_size=None,
             classifier='gap',
-            attn_record_layer=0):
+            attn_record_layer=-1):
 
     # (Possibly partial) ResNet root.
     if resnet is not None:
@@ -356,7 +358,11 @@ class VisionTransformer(nn.Module):
       x = IdentityLayer(x, name='pre_logits')
 
     x = nn.Dense(x, num_classes, name='head', kernel_init=nn.initializers.zeros)
-    return x, attention_weights
+
+    if attention_weights:
+      return x, attention_weights
+    else:
+      return x
 
 
 CONFIGS = {
