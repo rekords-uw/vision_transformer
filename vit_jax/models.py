@@ -359,10 +359,7 @@ class VisionTransformer(nn.Module):
 
     x = nn.Dense(x, num_classes, name='head', kernel_init=nn.initializers.zeros)
 
-    if attention_weights:
-      return x, attention_weights
-    else:
-      return x
+    return x, attention_weights
 
 
 CONFIGS = {

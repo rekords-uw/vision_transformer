@@ -72,6 +72,8 @@ def get_dataset_info(dataset, split):
   }
 
 def get_filenames(is_training, data_dir):
+  NUM_TRAIN_FILES = 1024
+  NUM_TEST_FILES = 128
   if is_training:
     return [os.path.join(data_dir, 'train-%05d-of-01024' % i) for i in range(NUM_TRAIN_FILES)]
   else:
@@ -131,6 +133,7 @@ def preprocess_image(image_buffer, is_training, inception_crop, resize_size, cro
     # usage of crop_size here is intentional
     im = tf.image.resize(im, [crop_size, crop_size])
   im = (im - 127.5) / 127.5
+  print(im.shape)
   return im
 
 def parse_record(raw_record, is_training, inception_crop, resize_size, crop_size):
@@ -173,14 +176,16 @@ def get_data_imagenet(base_data_dir,
   if mode == 'train':
     # Shuffle the input files
     dataset = dataset.shuffle(buffer_size=NUM_TRAIN_FILES)
-    dataset = dataset.interleave(lambda x: tf.data.TFRecordDataset(x, buffer_size=None, num_parallel_reads=None),
+  
+  dataset = dataset.interleave(lambda x: tf.data.TFRecordDataset(x, buffer_size=None, num_parallel_reads=None),
                                  num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    # Prefetch a batch at a time to smooth out the time taken for processing.
-    dataset = dataset.prefetch(buffer_size=batch_size)
+  # Prefetch a batch at a time to smooth out the time taken for processing.
+  dataset = dataset.prefetch(buffer_size=batch_size)
 
-  if is_training:
+  if mode == 'train':
     # Shuffles records before repeating to respect epoch boundaries. Show every element of one epoch before next.
     dataset = dataset.shuffle(buffer_size=shuffle_buffer, reshuffle_each_iteration=True)
+
 
   # Repeats the dataset for the number of epochs to train.
   dataset = dataset.repeat(repeats)
@@ -189,6 +194,7 @@ def get_data_imagenet(base_data_dir,
                                                    resize_size=resize_size, crop_size=crop_size),
                         num_parallel_calls=tf.data.experimental.AUTOTUNE)
   
+
   dataset = dataset.batch(batch_size, drop_remainder=True)
 
   num_devices = jax.local_device_count()
@@ -204,8 +210,6 @@ def get_data_imagenet(base_data_dir,
     dataset = dataset.map(_shard, tf.data.experimental.AUTOTUNE)
 
   return dataset.prefetch(1)
-
-
 
 
 def get_data(*,

@@ -47,24 +47,36 @@ def main(args):
 
   # Setup input pipeline
 
+  print('Before All')
   ds_train = input_pipeline.get_data_imagenet(
-      base_data_dir='imagenet_dir',
-      mode='train',
-      repeats=None,
+      base_data_dir='/home/ubuntu/mountV/imagenet_tf_record_data',
+      mode='test',
+      repeats=1,
       batch_size=args.batch)
-  batch = next(iter(ds_train))
-  logger.info(ds_train)
-  ds_test = input_pipeline.get_datai_imagenet(
-      base_data_dir='imagenet_dir',
+
+  print('G')
+  
+  for batch_temp in input_pipeline.prefetch(ds_train, args.prefetch):
+    batch = batch_temp
+    break
+
+  #logger.info(ds_train)
+  print('Before Loading')
+  ds_test = input_pipeline.get_data_imagenet(
+      base_data_dir='/home/ubuntu/mountV/imagenet_tf_record_data',
       mode='test',
       repeats=1,
       batch_size=args.batch_eval)
-  logger.info(ds_test)
+  #logger.info(ds_test)
+  print('After Loading')
+
+  #for batch in input_pipeline.prefetch(ds_test, args.prefetch):
+    #print(batch['image'].shape)
+    #print(type(batch['image'].dtype.name))
 
   # Build VisionTransformer architecture
   model = models.KNOWN_MODELS[args.model]
-  VisionTransformer = model.partial(num_classes=1000, 
-      attn_record_layer=attn_record_layer)
+  VisionTransformer = model.partial(num_classes=1000, attn_record_layer=attn_record_layer)
   _, params = VisionTransformer.init_by_shape(
       jax.random.PRNGKey(0),
       # Discard the "num_local_devices" dimension for initialization.
@@ -104,10 +116,11 @@ def main(args):
       print(batch['image'].shape)
       print(output.shape)
       print(attention_matrix.shape)
-      jnp.save('batch_image_%s.npy' % args.dataset, batch['image'][:,:10,:])
-      jnp.save('batch_attn_layer%d_%s.npy' % (attn_record_layer, args.dataset), attention_matrix[:,:10,:])
-      jnp.save('batch_label_%s.npy' % args.dataset, batch['label'][:,:10,:])
+      jnp.save('res/batch_image_%s.npy' % args.dataset, batch['image'][:,:10,:])
+      jnp.save('res/batch_attn_layer%d_%s.npy' % (attn_record_layer, args.dataset), attention_matrix[:,:10,:])
+      jnp.save('res/batch_label_%s.npy' % args.dataset, batch['label'][:,:10,:])
       first_batch = False
+      break
 
   if get_acc:
     acc_test = np.mean(acc)
